@@ -37,11 +37,15 @@ jobs:
           echo "== 下载 $BASE/$FILE"
           wget -q "$BASE/$FILE"
           tar --use-compress-program=unzstd -xf "$FILE"
-          ls -d immortalwrt-imagebuilder-* | tee /tmp/ibdir
+          rm -f "$FILE"
+          # 只匹配目录（结尾带 /），避免 tar 包同名前缀被误匹配
+          IB="$(pwd)/$(ls -d immortalwrt-imagebuilder-*/ | head -1)"
+          echo "$IB" > /tmp/ibdir
+          echo "ImageBuilder 目录: $IB"
 
       - name: 校验 profile 与驱动包名
         run: |
-          IB=$(cat /tmp/ibdir); cd "$IB"
+          IB=$(head -1 /tmp/ibdir); cd "$IB"
           echo "== 可用 profile（含 ax6s）=="
           make info | grep -i -B1 -A1 "ax6s" || true
           echo "== 基座里与无线驱动相关的包 =="
@@ -51,7 +55,7 @@ jobs:
         run: |
           # uci-defaults 必须是可执行，Windows 上提交容易丢执行位
           chmod +x "$GITHUB_WORKSPACE"/files/etc/uci-defaults/* 2>/dev/null || true
-          IB=$(cat /tmp/ibdir); cd "$IB"
+          IB=$(head -1 /tmp/ibdir); cd "$IB"
           BASE_PKGS="luci luci-i18n-base-zh-cn luci-app-ttyd"
           if [ "${{ github.event.inputs.driver }}" = "mtk" ]; then
             # 闭源 MTK SDK 驱动：剔除 mt76，装入 mt_wifi
@@ -69,7 +73,7 @@ jobs:
 
       - name: 校验产物里的驱动与固件
         run: |
-          IB=$(cat /tmp/ibdir); cd "$IB"
+          IB=$(head -1 /tmp/ibdir); cd "$IB"
           MAN=$(ls bin/targets/mediatek/mt7622/*.manifest | head -1)
           echo "== 实际装入的无线驱动 =="
           grep -E "^(kmod-mt76|kmod-mt7915e|kmod-mt_wifi|kmod-mt7622)" "$MAN" || echo "!! 未发现无线驱动包，产物不可用"
