@@ -1,0 +1,88 @@
+name: Build ImmortalWrt for Redmi AX6S
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ImmortalWrt 版本（24.10.6 稳定 / 25.12.2 最新）'
+        default: '24.10.6'
+        required: true
+      driver:
+        description: '无线驱动：mt76(开源) 或 mtk(闭源MTK SDK)'
+        type: choice
+        options: [mt76, mtk]
+        default: mt76
+      extra_packages:
+        description: '额外软件包（空格分隔，可写 -pkg 删除）'
+        default: ''
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd build-essential libncurses5-dev gawk gettext \
+            unzip file libssl-dev wget python3 rsync
+
+      - name: 下载 ImageBuilder
+        run: |
+          V="${{ github.event.inputs.version }}"
+          BASE="https://downloads.immortalwrt.org/releases/${V}/targets/mediatek/mt7622"
+          FILE="immortalwrt-imagebuilder-${V}-mediatek-mt7622.Linux-x86_64.tar.zst"
+          echo "== 下载 $BASE/$FILE"
+          wget -q "$BASE/$FILE"
+          tar --use-compress-program=unzstd -xf "$FILE"
+          ls -d immortalwrt-imagebuilder-* | tee /tmp/ibdir
+
+      - name: 校验 profile 与驱动包名
+        run: |
+          IB=$(cat /tmp/ibdir); cd "$IB"
+          echo "== 可用 profile（含 ax6s）=="
+          make info | grep -i -B1 -A1 "ax6s" || true
+          echo "== 基座里与无线驱动相关的包 =="
+          grep -rIoE "kmod-mt_wifi[a-z0-9-]*|kmod-mt7915e|kmod-mt76-core" . 2>/dev/null | sort -u | head -20 || true
+
+      - name: 生成固件
+        run: |
+          # uci-defaults 必须是可执行，Windows 上提交容易丢执行位
+          chmod +x "$GITHUB_WORKSPACE"/files/etc/uci-defaults/* 2>/dev/null || true
+          IB=$(cat /tmp/ibdir); cd "$IB"
+          BASE_PKGS="luci luci-i18n-base-zh-cn luci-app-ttyd"
+          if [ "${{ github.event.inputs.driver }}" = "mtk" ]; then
+            # 闭源 MTK SDK 驱动：剔除 mt76，装入 mt_wifi
+            DRIVER_PKGS="-kmod-mt7915e -kmod-mt76-core -kmod-mt76-sdio -kmod-mt76-usb +kmod-mt_wifi"
+          else
+            DRIVER_PKGS=""
+          fi
+          PKGS="$BASE_PKGS $DRIVER_PKGS ${{ github.event.inputs.extra_packages }}"
+          echo "== PACKAGES: $PKGS"
+          make image \
+            PROFILE="xiaomi_redmi-router-ax6s" \
+            PACKAGES="$PKGS" \
+            FILES="$GITHUB_WORKSPACE/files" \
+            -j"$(nproc)"
+
+      - name: 校验产物里的驱动与固件
+        run: |
+          IB=$(cat /tmp/ibdir); cd "$IB"
+          MAN=$(ls bin/targets/mediatek/mt7622/*.manifest | head -1)
+          echo "== 实际装入的无线驱动 =="
+          grep -E "^(kmod-mt76|kmod-mt7915e|kmod-mt_wifi|kmod-mt7622)" "$MAN" || echo "!! 未发现无线驱动包，产物不可用"
+          echo "== 2.4G patch 固件（mtk 驱动才有）=="
+          grep -i "mt7622" "$MAN" || echo "（mt76 方案不需要 mt7622_patch_e2_hdr.bin，属正常）"
+          ls -lh bin/targets/mediatek/mt7622/ | head -20
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax6s-${{ github.event.inputs.version }}-${{ github.event.inputs.driver }}
+          path: |
+            immortalwrt-imagebuilder-*/bin/targets/mediatek/mt7622/*.itb
+            immortalwrt-imagebuilder-*/bin/targets/mediatek/mt7622/*.bin
+            immortalwrt-imagebuilder-*/bin/targets/mediatek/mt7622/*.manifest
+          if-no-files-found: error

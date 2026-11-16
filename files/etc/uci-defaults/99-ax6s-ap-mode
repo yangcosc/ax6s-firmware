@@ -1,0 +1,87 @@
+#!/bin/sh
+# AX6S 纯 AP 预设 —— 只在首次启动时执行一次
+# 刷完直接可用：管理地址 http://192.168.100.2，无线 SSID/密码见下方变量
+
+# ============ 需要按需修改 ============
+SSID_2G="3022"
+SSID_5G="3022-5G"
+WIFI_KEY="CHANGE_ME_8位以上"
+ROOT_PASSWORD=""        # 留空 = 首次登录 LuCI 时手动设置
+# =====================================
+
+# 0) 无线配置兜底：新固件首次启动可能还没生成 /etc/config/wireless
+if [ ! -s /etc/config/wireless ]; then
+  wifi detect > /etc/config/wireless 2>/dev/null
+fi
+
+# 1) LAN 并入主路由网段
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.100.2'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.gateway='192.168.100.1'
+uci set network.lan.dns='192.168.100.1'
+
+# 2) 关闭 WAN，消除与 br-lan 的双归属
+uci set network.wan.disabled='1'
+uci -q delete network.wan6
+
+# 3) 不再提供 DHCP/DNS（由主路由统一分发）
+uci set dhcp.lan.ignore='1'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ra='disabled'
+
+# 4) 防火墙：不 NAT、放行管理
+uci set firewall.@zone[0].masq='0'
+uci set firewall.@zone[0].input='ACCEPT'
+
+# 5) 无线：按 band 判断（不依赖 radio0/radio1 顺序）
+for r in $(uci show wireless | sed -n 's/^wireless\.\(radio[0-9]*\)\.band=.*/\1/p'); do
+  band=$(uci -q get wireless.$r.band)
+  uci set wireless.$r.country='CN'
+  uci set wireless.$r.disabled='0'
+  case "$band" in
+    2g)
+      uci set wireless.$r.channel='6'
+      uci set wireless.$r.htmode='HT20'
+      ssid="$SSID_2G"
+      ;;
+    5g)
+      uci set wireless.$r.channel='149'
+      uci set wireless.$r.htmode='VHT80'
+      ssid="$SSID_5G"
+      ;;
+    *) continue ;;
+  esac
+  # 没有对应 AP 接口就建一个
+  sec="ap_${r}"
+  if ! uci -q get wireless.$sec >/dev/null; then
+    uci set wireless.$sec='wifi-iface'
+    uci set wireless.$sec.device="$r"
+    uci set wireless.$sec.mode='ap'
+    uci set wireless.$sec.network='lan'
+    uci set wireless.$sec.encryption='psk2'
+    uci set wireless.$sec.key="$WIFI_KEY"
+    uci set wireless.$sec.disabled='0'
+  fi
+  uci set wireless.$sec.ssid="$ssid"
+done
+
+# 6) 时间同步走主路由（没有 WAN 时默认 NTP 会失败）
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='192.168.100.1'
+uci set system.ntp.enabled='1'
+uci set system.ntp.enable_server='0'
+
+uci commit
+
+# 7) 可选：预设 root 密码
+if [ -n "$ROOT_PASSWORD" ]; then
+  printf '%s\n%s\n' "$ROOT_PASSWORD" "$ROOT_PASSWORD" | passwd root >/dev/null 2>&1
+fi
+
+# 8) 停用这台设备上不需要的服务
+for s in dnsmasq odhcpd mwan3 haproxy autoreboot openclash shadowsocksr upnpd bootcount; do
+  [ -x "/etc/init.d/$s" ] && { /etc/init.d/$s stop 2>/dev/null; /etc/init.d/$s disable 2>/dev/null; }
+done
+
+exit 0
